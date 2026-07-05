@@ -1,6 +1,6 @@
-![TaskPop screenshot](assets/taskpop-screenshot.png)
-
 # TaskPop
+
+![TaskPop screenshot](assets/taskpop-screenshot.png)
 
 A fast local-first Ubuntu task popup with optional Google Tasks sync.
 
