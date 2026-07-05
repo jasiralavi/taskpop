@@ -76,21 +76,39 @@ class GoogleSync:
         self.config.set("sync_mode", "google")
         return self.service
 
+    def create_remote_task_list(self, title: str, interactive: bool = True) -> str:
+        service = self.service or self.authorize(interactive=interactive)
+        created = service.tasklists().insert(body={"title": title}).execute()
+        return created["id"]
+
+    def delete_remote_task_list(self, google_list_id: str, interactive: bool = True) -> None:
+        service = self.service or self.authorize(interactive=interactive)
+        service.tasklists().delete(tasklist=google_list_id).execute()
+
+    def rename_remote_task_list(self, google_list_id: str, title: str, interactive: bool = True) -> None:
+        service = self.service or self.authorize(interactive=interactive)
+        service.tasklists().patch(tasklist=google_list_id, body={"title": title}).execute()
+
+    def delete_remote_task(self, google_list_id: str, google_task_id: str, interactive: bool = True) -> None:
+        service = self.service or self.authorize(interactive=interactive)
+        service.tasks().delete(tasklist=google_list_id, task=google_task_id).execute()
+
     def sync(self, interactive: bool = False) -> None:
         self.status_cb("Syncing…")
         service = self.service or self.authorize(interactive=interactive)
         self.pull(service)
         self.push_dirty(service)
-        dirty = self.db.count_dirty()
-        self.status_cb("Synced" if dirty == 0 else f"{dirty} changes pending")
+        dirty = self.db.count_dirty_google()
+        self.status_cb("Synced" if dirty == 0 else f"{dirty} Google changes pending")
 
     def pull(self, service) -> None:
         token = None
         while True:
             result = service.tasklists().list(pageToken=token, maxResults=100).execute()
             for item in result.get("items", []):
-                list_id = self.db.upsert_google_list(item.get("title", "Untitled"), item["id"])
-                self.pull_tasks_for_list(service, list_id, item["id"])
+                google_list_id = item["id"]
+                list_id = self.db.upsert_google_list(item.get("title", "Untitled"), google_list_id)
+                self.pull_tasks_for_list(service, list_id, google_list_id)
             token = result.get("nextPageToken")
             if not token:
                 break
@@ -120,21 +138,12 @@ class GoogleSync:
                 break
 
     def push_dirty(self, service) -> None:
-        for task in self.db.dirty_tasks():
+        for task in self.db.dirty_tasks(google_only=True):
             task_list = self.db.get_list(task.list_id)
-            if not task_list:
+            if not task_list or not task_list.google_list_id:
                 continue
 
             google_list_id = task_list.google_list_id
-            if not google_list_id:
-                # For local lists, create a matching list in Google on first sync.
-                created_list = service.tasklists().insert(body={"title": task_list.title}).execute()
-                google_list_id = created_list["id"]
-                self.db.conn.execute(
-                    "UPDATE lists SET source = 'google', google_list_id = ?, updated_at = datetime('now') WHERE id = ?",
-                    (google_list_id, task_list.id),
-                )
-                self.db.conn.commit()
 
             body = {
                 "title": task.title,

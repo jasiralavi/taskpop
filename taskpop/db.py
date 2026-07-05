@@ -120,6 +120,27 @@ class TaskDB:
             CREATE INDEX IF NOT EXISTS idx_tasks_dirty ON tasks(is_dirty);
             """
         )
+        self.ensure_list_position_column()
+        self.conn.commit()
+
+    def ensure_list_position_column(self) -> None:
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(lists)").fetchall()}
+        if "position" not in columns:
+            self.conn.execute("ALTER TABLE lists ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
+
+        rows = self.conn.execute(
+            "SELECT id, position FROM lists ORDER BY position ASC, created_at ASC, title COLLATE NOCASE ASC"
+        ).fetchall()
+        if rows and all(int(row["position"] or 0) == 0 for row in rows):
+            for idx, row in enumerate(rows, start=1):
+                self.conn.execute("UPDATE lists SET position = ? WHERE id = ?", (idx, row["id"]))
+
+    def normalize_list_positions(self) -> None:
+        rows = self.conn.execute(
+            "SELECT id FROM lists ORDER BY position ASC, created_at ASC, title COLLATE NOCASE ASC"
+        ).fetchall()
+        for idx, row in enumerate(rows, start=1):
+            self.conn.execute("UPDATE lists SET position = ? WHERE id = ?", (idx, row["id"]))
         self.conn.commit()
 
     def ensure_default_list(self) -> None:
@@ -130,12 +151,16 @@ class TaskDB:
     def create_list(self, title: str, source: str = "local", google_list_id: str | None = None, last_used: bool = False) -> str:
         list_id = str(uuid.uuid4())
         ts = now_iso()
+        order_row = self.conn.execute(
+            "SELECT COALESCE(MAX(position), 0) + 1 AS next_position FROM lists"
+        ).fetchone()
+        position = int(order_row["next_position"] or 1)
         self.conn.execute(
             """
-            INSERT INTO lists(id, title, source, google_list_id, last_used, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO lists(id, title, source, google_list_id, last_used, created_at, updated_at, position)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (list_id, title, source, google_list_id, 1 if last_used else 0, ts, ts),
+            (list_id, title, source, google_list_id, 1 if last_used else 0, ts, ts, position),
         )
         if last_used:
             self.set_last_list(list_id)
@@ -157,17 +182,11 @@ class TaskDB:
         return self.create_list(title, source="google", google_list_id=google_list_id)
 
     def list_lists(self) -> list[TaskList]:
-        # Use a stable order for keyboard cycling.
-        #
-        # Older versions sorted by last_used/updated_at. That made Ctrl+Tab
-        # appear to switch only between the last two lists because every switch
-        # changed last_used and updated_at, reordering the list before the next
-        # Ctrl+Tab press.
         rows = self.conn.execute(
             """
             SELECT id, title, source, google_list_id
             FROM lists
-            ORDER BY created_at ASC, title COLLATE NOCASE ASC
+            ORDER BY position ASC, created_at ASC, title COLLATE NOCASE ASC
             """
         ).fetchall()
         return [TaskList(**dict(r)) for r in rows]
@@ -238,16 +257,10 @@ class TaskDB:
         return self.add_task(list_id, title, notes=notes, google_task_id=google_task_id, dirty=False)
 
     def list_tasks(self, list_id: str, include_completed_ids: set[str] | None = None, filter_text: str = "") -> list[Task]:
-        include_completed_ids = include_completed_ids or set()
+        # Completed tasks stay visible until explicitly cleared.
+        # They are sorted below active tasks.
         params: list = [list_id]
         clauses = ["list_id = ?", "is_deleted = 0"]
-
-        if include_completed_ids:
-            placeholders = ",".join("?" for _ in include_completed_ids)
-            clauses.append(f"(status = 'needsAction' OR id IN ({placeholders}))")
-            params.extend(list(include_completed_ids))
-        else:
-            clauses.append("status = 'needsAction'")
 
         if filter_text.strip():
             clauses.append("LOWER(title) LIKE ?")
@@ -257,10 +270,35 @@ class TaskDB:
             SELECT id, list_id, title, notes, status, google_task_id, is_dirty, sort_order, updated_at, completed_at
             FROM tasks
             WHERE {' AND '.join(clauses)}
-            ORDER BY status ASC, sort_order ASC, updated_at DESC
+            ORDER BY
+                CASE WHEN status = 'completed' THEN 1 ELSE 0 END ASC,
+                sort_order ASC,
+                updated_at DESC
         """
         rows = self.conn.execute(query, params).fetchall()
         return [Task(**dict(r)) for r in rows]
+
+    def get_task(self, task_id: str) -> Task | None:
+        row = self.conn.execute(
+            """
+            SELECT id, list_id, title, notes, status, google_task_id, is_dirty, sort_order, updated_at, completed_at
+            FROM tasks
+            WHERE id = ? AND is_deleted = 0
+            """,
+            (task_id,),
+        ).fetchone()
+        return Task(**dict(row)) if row else None
+
+    def update_task_title(self, task_id: str, title: str, dirty: bool = True) -> None:
+        self.conn.execute(
+            """
+            UPDATE tasks
+            SET title = ?, is_dirty = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (title.strip(), 1 if dirty else 0, now_iso(), task_id),
+        )
+        self.conn.commit()
 
     def toggle_task(self, task_id: str) -> str:
         row = self.conn.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
@@ -290,15 +328,29 @@ class TaskDB:
         self.conn.execute("UPDATE tasks SET is_dirty = 0 WHERE id = ?", (task_id,))
         self.conn.commit()
 
-    def dirty_tasks(self) -> list[Task]:
-        rows = self.conn.execute(
-            """
-            SELECT id, list_id, title, notes, status, google_task_id, is_dirty, sort_order, updated_at, completed_at
-            FROM tasks
-            WHERE is_dirty = 1 AND is_deleted = 0
-            ORDER BY updated_at ASC
-            """
-        ).fetchall()
+    def dirty_tasks(self, google_only: bool = False) -> list[Task]:
+        if google_only:
+            rows = self.conn.execute(
+                """
+                SELECT t.id, t.list_id, t.title, t.notes, t.status, t.google_task_id,
+                       t.is_dirty, t.sort_order, t.updated_at, t.completed_at
+                FROM tasks t
+                JOIN lists l ON l.id = t.list_id
+                WHERE t.is_dirty = 1
+                  AND t.is_deleted = 0
+                  AND l.google_list_id IS NOT NULL
+                ORDER BY t.updated_at ASC
+                """
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                SELECT id, list_id, title, notes, status, google_task_id, is_dirty, sort_order, updated_at, completed_at
+                FROM tasks
+                WHERE is_dirty = 1 AND is_deleted = 0
+                ORDER BY updated_at ASC
+                """
+            ).fetchall()
         return [Task(**dict(r)) for r in rows]
 
     def delete_list(self, list_id: str) -> None:
@@ -306,6 +358,94 @@ class TaskDB:
         self.conn.execute("DELETE FROM lists WHERE id = ?", (list_id,))
         self.conn.commit()
         self.ensure_default_list()
+        self.normalize_list_positions()
+
+    def convert_list_to_google(self, list_id: str, google_list_id: str) -> None:
+        ts = now_iso()
+        self.conn.execute(
+            "UPDATE lists SET source = 'google', google_list_id = ?, updated_at = ? WHERE id = ?",
+            (google_list_id, ts, list_id),
+        )
+        self.conn.execute(
+            "UPDATE tasks SET is_dirty = 1, updated_at = ? WHERE list_id = ? AND is_deleted = 0",
+            (ts, list_id),
+        )
+        self.conn.commit()
+
+    def convert_list_to_local(self, list_id: str) -> None:
+        ts = now_iso()
+        self.conn.execute(
+            "UPDATE lists SET source = 'local', google_list_id = NULL, updated_at = ? WHERE id = ?",
+            (ts, list_id),
+        )
+        self.conn.execute(
+            "UPDATE tasks SET google_task_id = NULL, is_dirty = 0, updated_at = ? WHERE list_id = ?",
+            (ts, list_id),
+        )
+        self.conn.commit()
+
+    def rename_list(self, list_id: str, title: str) -> None:
+        self.conn.execute(
+            "UPDATE lists SET title = ?, updated_at = ? WHERE id = ?",
+            (title.strip(), now_iso(), list_id),
+        )
+        self.conn.commit()
+
+    def completed_tasks(self, list_id: str) -> list[Task]:
+        rows = self.conn.execute(
+            """
+            SELECT id, list_id, title, notes, status, google_task_id, is_dirty, sort_order, updated_at, completed_at
+            FROM tasks
+            WHERE list_id = ?
+              AND is_deleted = 0
+              AND status = 'completed'
+            ORDER BY completed_at ASC, updated_at ASC
+            """,
+            (list_id,),
+        ).fetchall()
+        return [Task(**dict(r)) for r in rows]
+
+    def clear_completed(self, list_id: str) -> int:
+        cur = self.conn.execute(
+            "DELETE FROM tasks WHERE list_id = ? AND status = 'completed'",
+            (list_id,),
+        )
+        self.conn.commit()
+        return int(cur.rowcount or 0)
+
+    def count_dirty_google(self) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM tasks t
+            JOIN lists l ON l.id = t.list_id
+            WHERE t.is_dirty = 1
+              AND t.is_deleted = 0
+              AND l.google_list_id IS NOT NULL
+            """
+        ).fetchone()
+        return int(row["c"] if row else 0)
+
+    def set_list_order(self, ordered_ids: list[str]) -> None:
+        current_rows = self.conn.execute(
+            "SELECT id FROM lists ORDER BY position ASC, created_at ASC, title COLLATE NOCASE ASC"
+        ).fetchall()
+        current_ids = [row["id"] for row in current_rows]
+
+        seen = set()
+        final_ids = []
+        for list_id in ordered_ids:
+            if list_id in current_ids and list_id not in seen:
+                final_ids.append(list_id)
+                seen.add(list_id)
+
+        for list_id in current_ids:
+            if list_id not in seen:
+                final_ids.append(list_id)
+
+        for idx, list_id in enumerate(final_ids, start=1):
+            self.conn.execute("UPDATE lists SET position = ?, updated_at = ? WHERE id = ?", (idx, now_iso(), list_id))
+        self.conn.commit()
 
     def get_list(self, list_id: str) -> TaskList | None:
         row = self.conn.execute(

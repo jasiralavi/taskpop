@@ -4,19 +4,3 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
-
-# Python
-__pycache__/
-*.pyc
-.venv/
-
-# Local TaskPop data / secrets
-*.db
-*.sqlite
-google_client_secret.json
-google_token.json
-config.json
-
-# Build/output
-dist/
-build/
