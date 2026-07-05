@@ -23,7 +23,7 @@ except ImportError:
     from google_sync import GoogleSync, GoogleSyncError
 
 APP_ID = "com.dsynz.TaskPop"
-APP_VERSION = "v0.3.0"
+APP_VERSION = "v0.3.1"
 
 COMMANDS: list[tuple[str, str]] = [
     (":list-l <name>", "Create a new local list"),

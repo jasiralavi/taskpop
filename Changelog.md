@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.3.1
+
+- Fixed Google Tasks sync getting stuck when a previously synced Google task was deleted remotely.
+- TaskPop now recreates the missing Google task instead of staying at `Offline · pending`.
+
+
+## v34-test
+
+Test build. Do not push until verified.
+
+- Fixed Google sync 404 errors when a synced task was deleted in Google Tasks outside TaskPop.
+- Missing remote Google tasks are recreated on sync instead of leaving TaskPop in `Offline · pending`.
+- If the remote Google list is missing, TaskPop recreates the list and updates the local mapping.
+
+
 ## v33-test
 
 Test build. Do not push as final until verified.

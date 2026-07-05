@@ -204,3 +204,8 @@ The primary Google Tasks list cannot be deleted by Google. If you try to delete 
 - Better recurring task support.
 - Import/export.
 - Packaging as a `.deb`.
+
+
+## Google sync conflict handling
+
+If a synced task is deleted from Google Tasks outside TaskPop, TaskPop recreates the missing Google task on the next sync instead of getting stuck with an offline pending state.

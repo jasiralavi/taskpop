@@ -94,6 +94,37 @@ class GoogleSync:
         service = self.service or self.authorize(interactive=interactive)
         service.tasks().delete(tasklist=google_list_id, task=google_task_id).execute()
 
+    def is_not_found_error(self, exc: Exception) -> bool:
+        resp = getattr(exc, "resp", None)
+        status = getattr(resp, "status", None)
+        text = str(exc)
+        return status == 404 or "notFound" in text or "Requested entity was not found" in text
+
+    def set_list_google_id(self, list_id: str, google_list_id: str) -> None:
+        self.db.conn.execute(
+            "UPDATE lists SET source = 'google', google_list_id = ?, updated_at = datetime('now') WHERE id = ?",
+            (google_list_id, list_id),
+        )
+        self.db.conn.commit()
+
+    def insert_remote_task(self, service, google_list_id: str, task, body: dict):
+        return service.tasks().insert(tasklist=google_list_id, body=body).execute()
+
+    def insert_remote_task_with_list_recovery(self, service, task_list, task, body: dict):
+        google_list_id = task_list.google_list_id
+        try:
+            return self.insert_remote_task(service, google_list_id, task, body)
+        except Exception as exc:
+            if not self.is_not_found_error(exc):
+                raise
+
+            # The remote Google list itself may have been deleted outside TaskPop.
+            # Recreate the list, update the local mapping, then insert the task.
+            created_list = service.tasklists().insert(body={"title": task_list.title}).execute()
+            google_list_id = created_list["id"]
+            self.set_list_google_id(task_list.id, google_list_id)
+            return self.insert_remote_task(service, google_list_id, task, body)
+
     def sync(self, interactive: bool = False) -> None:
         self.status_cb("Syncing…")
         service = self.service or self.authorize(interactive=interactive)
@@ -164,12 +195,21 @@ class GoogleSync:
                     body["due"] = str(task.due_date)[:10] + "T00:00:00.000Z"
 
             if task.google_task_id:
-                service.tasks().patch(
-                    tasklist=google_list_id,
-                    task=task.google_task_id,
-                    body=body,
-                ).execute()
-                self.db.mark_clean(task.id)
+                try:
+                    service.tasks().patch(
+                        tasklist=google_list_id,
+                        task=task.google_task_id,
+                        body=body,
+                    ).execute()
+                    self.db.mark_clean(task.id)
+                except Exception as exc:
+                    if not self.is_not_found_error(exc):
+                        raise
+
+                    # The remote task was deleted outside TaskPop. Recreate it
+                    # instead of leaving sync stuck at Offline / pending.
+                    created = self.insert_remote_task_with_list_recovery(service, task_list, task, body)
+                    self.db.update_google_task_id(task.id, created["id"])
             else:
-                created = service.tasks().insert(tasklist=google_list_id, body=body).execute()
+                created = self.insert_remote_task_with_list_recovery(service, task_list, task, body)
                 self.db.update_google_task_id(task.id, created["id"])
