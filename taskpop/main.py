@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import ast
+import re
 import subprocess
 import sys
 import threading
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import gi
@@ -21,7 +23,7 @@ except ImportError:
     from google_sync import GoogleSync, GoogleSyncError
 
 APP_ID = "com.dsynz.TaskPop"
-APP_VERSION = "v0.2.0"
+APP_VERSION = "v0.3.0"
 
 COMMANDS: list[tuple[str, str]] = [
     (":list-l <name>", "Create a new local list"),
@@ -60,6 +62,7 @@ class TaskPopWindow(Gtk.ApplicationWindow):
         self.selected_index = 0
         self.pending_action: str | None = None
         self.pending_task_id: str | None = None
+        self.detail_task_id: str | None = None
         self.default_placeholder = "Type to filter · Ctrl+Enter to add"
         self.task_rows: list[tuple[Task | None, Gtk.ListBoxRow]] = []
         self.command_matches: list[tuple[str, str]] = []
@@ -104,6 +107,9 @@ class TaskPopWindow(Gtk.ApplicationWindow):
         .setup-button { padding: 12px; }
         .settings-section { font-weight: 700; margin-top: 10px; }
         .settings-row { padding: 2px 0; }
+        .detail-panel { padding: 10px; }
+        .detail-title { font-weight: 700; font-size: 16px; }
+        .detail-label { opacity: .8; font-weight: 600; }
         """
         provider = Gtk.CssProvider()
         provider.load_from_data(css)
@@ -188,6 +194,10 @@ class TaskPopWindow(Gtk.ApplicationWindow):
         # Plain Enter should not add tasks. Ctrl+Enter is handled by the key controller.
         root.append(self.entry)
 
+        self.content_stack = Gtk.Stack()
+        self.content_stack.set_vexpand(True)
+
+        self.list_area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.scroller = Gtk.ScrolledWindow()
         self.scroller.set_vexpand(True)
         self.listbox = Gtk.ListBox()
@@ -196,13 +206,137 @@ class TaskPopWindow(Gtk.ApplicationWindow):
         self.listbox.set_selection_mode(Gtk.SelectionMode.NONE)
         self.listbox.set_focusable(False)
         self.scroller.set_child(self.listbox)
-        root.append(self.scroller)
+        self.list_area.append(self.scroller)
 
-        hints = Gtk.Label(label="↑/↓ navigate · Space complete/uncomplete · Ctrl+Tab switch list · Esc close")
+        self.detail_view = self.build_task_detail_view()
+        self.content_stack.add_named(self.list_area, "list")
+        self.content_stack.add_named(self.detail_view, "detail")
+        self.content_stack.set_visible_child_name("list")
+        root.append(self.content_stack)
+
+        hints = Gtk.Label(label="↑/↓ navigate · Ctrl+D details · Space complete · Ctrl+Tab switch · Esc close")
         hints.add_css_class("status")
         hints.set_xalign(0)
         root.append(hints)
         return root
+
+    def build_task_detail_view(self) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.add_css_class("detail-panel")
+        box.set_vexpand(True)
+
+        heading = Gtk.Label(label="Task Details")
+        heading.add_css_class("detail-title")
+        heading.set_xalign(0)
+        box.append(heading)
+
+        name_label = Gtk.Label(label="Task name")
+        name_label.add_css_class("detail-label")
+        name_label.set_xalign(0)
+        box.append(name_label)
+
+        self.detail_name_entry = Gtk.Entry()
+        box.append(self.detail_name_entry)
+
+        notes_label = Gtk.Label(label="Task details / notes")
+        notes_label.add_css_class("detail-label")
+        notes_label.set_xalign(0)
+        box.append(notes_label)
+
+        notes_scroller = Gtk.ScrolledWindow()
+        notes_scroller.set_min_content_height(110)
+        notes_scroller.set_vexpand(True)
+        self.detail_notes_view = Gtk.TextView()
+        self.detail_notes_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        if hasattr(self.detail_notes_view, "set_accepts_tab"):
+            self.detail_notes_view.set_accepts_tab(False)
+        notes_key = Gtk.EventControllerKey()
+        notes_key.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        notes_key.connect("key-pressed", self.on_detail_notes_key_pressed)
+        self.detail_notes_view.add_controller(notes_key)
+        notes_scroller.set_child(self.detail_notes_view)
+        box.append(notes_scroller)
+
+        due_label = Gtk.Label(label="Date & time")
+        due_label.add_css_class("detail-label")
+        due_label.set_xalign(0)
+        box.append(due_label)
+
+        self.detail_due_entry = Gtk.Entry()
+        self.detail_due_entry.set_placeholder_text("Examples: 23/08 6am, 13jan 1600, tomorrow at 6pm")
+        self.detail_due_entry.connect("changed", lambda *_: self.update_detail_due_preview())
+        box.append(self.detail_due_entry)
+
+        self.detail_due_preview = Gtk.Label(label="")
+        self.detail_due_preview.add_css_class("status")
+        self.detail_due_preview.set_xalign(0)
+        self.detail_due_preview.set_wrap(True)
+        box.append(self.detail_due_preview)
+
+        remind_label = Gtk.Label(label="Remind me")
+        remind_label.add_css_class("detail-label")
+        remind_label.set_xalign(0)
+        box.append(remind_label)
+
+        remind_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.detail_remind_due_check = Gtk.CheckButton(label="at time of task")
+        self.detail_remind_custom_check = Gtk.CheckButton(label="remind at")
+        remind_row.append(self.detail_remind_due_check)
+        remind_row.append(self.detail_remind_custom_check)
+        box.append(remind_row)
+
+        self.detail_reminder_entry = Gtk.Entry()
+        self.detail_reminder_entry.set_placeholder_text("Optional reminder time, e.g. tomorrow 17:30")
+        self.detail_reminder_entry.connect("changed", lambda *_: self.update_detail_reminder_preview())
+        box.append(self.detail_reminder_entry)
+
+        self.detail_reminder_preview = Gtk.Label(label="")
+        self.detail_reminder_preview.add_css_class("status")
+        self.detail_reminder_preview.set_xalign(0)
+        self.detail_reminder_preview.set_wrap(True)
+        box.append(self.detail_reminder_preview)
+
+        button_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        button_row.set_halign(Gtk.Align.END)
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.connect("clicked", lambda *_: self.cancel_task_details_editor())
+        save_btn = Gtk.Button(label="Save")
+        save_btn.connect("clicked", lambda *_: self.save_task_details_editor())
+        button_row.append(cancel_btn)
+        button_row.append(save_btn)
+        box.append(button_row)
+
+        note = Gtk.Label(label="Ctrl+Enter / Ctrl+S saves · Esc cancels")
+        note.add_css_class("status")
+        note.set_xalign(0)
+        box.append(note)
+        return box
+
+    def on_detail_notes_key_pressed(self, controller, keyval, keycode, state):
+        shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
+        if keyval in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab):
+            if shift or keyval == Gdk.KEY_ISO_Left_Tab:
+                self.detail_name_entry.grab_focus()
+            else:
+                self.detail_due_entry.grab_focus()
+            return True
+        return False
+
+    def save_settings_and_sync(self, dialog: Gtk.Dialog) -> None:
+        dialog.destroy()
+        self.resume_main_controls(refocus=False)
+        if self.google_ready():
+            GLib.idle_add(lambda: (self.start_sync_now_flow(), False)[1])
+        else:
+            self.set_status("Settings saved")
+            self.focus_entry()
+
+    def on_settings_key_pressed(self, dialog: Gtk.Dialog, keyval, keycode, state):
+        ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        if ctrl and keyval in (Gdk.KEY_s, Gdk.KEY_S):
+            self.save_settings_and_sync(dialog)
+            return True
+        return False
 
     def init_key_controller(self) -> None:
         controller = Gtk.EventControllerKey()
@@ -242,6 +376,32 @@ class TaskPopWindow(Gtk.ApplicationWindow):
 
     def local_lists_enabled(self) -> bool:
         return bool(self.config.get("local_lists_enabled", True))
+
+    def date_display_order(self) -> str:
+        value = self.config.get("date_display_order", "date_month")
+        return value if value in ("date_month", "month_date") else "date_month"
+
+    def time_display_format(self) -> str:
+        value = self.config.get("time_display_format", "24")
+        return value if value in ("24", "ampm") else "24"
+
+    def toggle_date_display_order(self, button: Gtk.Button | None = None) -> None:
+        new_value = "month_date" if self.date_display_order() == "date_month" else "date_month"
+        self.config.set("date_display_order", new_value)
+        label = "Month-Date" if new_value == "month_date" else "Date-Month"
+        if button:
+            button.set_label(label)
+        self.set_status(f"Date display: {label}")
+        self.refresh_tasks(keep_selection=True)
+
+    def toggle_time_display_format(self, button: Gtk.Button | None = None) -> None:
+        new_value = "ampm" if self.time_display_format() == "24" else "24"
+        self.config.set("time_display_format", new_value)
+        label = "AM/PM" if new_value == "ampm" else "24 hrs"
+        if button:
+            button.set_label(label)
+        self.set_status(f"Time display: {label}")
+        self.refresh_tasks(keep_selection=True)
 
     def google_tasks_enabled(self) -> bool:
         return bool(self.config.get("google_tasks_enabled", self.config.get("sync_mode") == "google"))
@@ -320,6 +480,11 @@ class TaskPopWindow(Gtk.ApplicationWindow):
         dialog.set_default_size(560, 620)
         dialog.add_button("Close", Gtk.ResponseType.CLOSE)
 
+        settings_key = Gtk.EventControllerKey()
+        settings_key.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        settings_key.connect("key-pressed", lambda controller, keyval, keycode, state: self.on_settings_key_pressed(dialog, keyval, keycode, state))
+        dialog.add_controller(settings_key)
+
         content = dialog.get_content_area()
         content.set_spacing(12)
         content.set_margin_top(16)
@@ -384,6 +549,26 @@ class TaskPopWindow(Gtk.ApplicationWindow):
         shortcut_row.append(shortcut_btn)
         content.append(shortcut_row)
 
+        date_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        date_label = Gtk.Label(label="Date display format")
+        date_label.set_xalign(0)
+        date_label.set_hexpand(True)
+        date_row.append(date_label)
+        date_btn = Gtk.Button(label="Month-Date" if self.date_display_order() == "month_date" else "Date-Month")
+        date_btn.connect("clicked", lambda btn: self.toggle_date_display_order(btn))
+        date_row.append(date_btn)
+        content.append(date_row)
+
+        time_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        time_label = Gtk.Label(label="Time display format")
+        time_label.set_xalign(0)
+        time_label.set_hexpand(True)
+        time_row.append(time_label)
+        time_btn = Gtk.Button(label="AM/PM" if self.time_display_format() == "ampm" else "24 hrs")
+        time_btn.connect("clicked", lambda btn: self.toggle_time_display_format(btn))
+        time_row.append(time_btn)
+        content.append(time_row)
+
         create_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         create_label = Gtk.Label(label="Create New List")
         create_label.set_xalign(0)
@@ -425,10 +610,11 @@ class TaskPopWindow(Gtk.ApplicationWindow):
             label=(
                 "• To filter and find tasks: type in the main input\n"
                 "• To add a task in the current list: type the task name and press Ctrl+Enter\n"
-                "• To edit the selected task: Shift+Enter or Ctrl+E\n"
+                "• To edit the selected task quickly: Shift+Enter or Ctrl+E\n"
+                "• To open the full task details panel: Ctrl+D\n"
                 "• To rename the current list: Ctrl+L\n"
                 "• To copy the selected task text: Ctrl+C\n"
-                "• To open Settings: Ctrl+S or :settings\n"
+                "• To open Settings: Ctrl+O or :settings\n"
                 "• To clear completed tasks: Ctrl+K, 🧹, or :clear\n"
                 "• To switch lists: Ctrl+Tab / Ctrl+Shift+Tab\n"
                 "• To jump to a list: Ctrl+1 to Ctrl+9, Ctrl+0 for the last visible list\n"
@@ -436,7 +622,8 @@ class TaskPopWindow(Gtk.ApplicationWindow):
                 "• Example: ':list' or ':google' filters matching commands and descriptions\n"
                 "• Use Up and Down to navigate tasks and commands\n"
                 "• Press Space to tick/untick a selected task\n"
-                "• Press Ctrl+Enter to trigger a selected command"
+                "• Press Ctrl+Enter to trigger a selected command\n"
+                "• Ctrl+S saves task details/settings, or syncs from the main list"
             )
         )
         help_text.set_xalign(0)
@@ -869,6 +1056,308 @@ class TaskPopWindow(Gtk.ApplicationWindow):
         icon = "🌐" if (self.current_list.google_list_id or self.current_list.source == "google") else "💻"
         total = max(len(self.lists), 1)
         self.list_label.set_text(f"{index}/{total} {icon} {self.current_list.title}")
+
+    def clean_datetime_text(self, value: str) -> str:
+        text = value.strip().lower()
+        replacements = {
+            "tomorrw": "tomorrow",
+            "tommorow": "tomorrow",
+            "tmrw": "tomorrow",
+            "tmr": "tomorrow",
+            "hrs": "",
+            "hr": "",
+            "hours": "",
+        }
+        for old, new in replacements.items():
+            text = re.sub(rf"\b{re.escape(old)}\b", new, text)
+        text = text.replace(",", " ").replace(".", " ")
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+
+    def month_from_text(self, value: str) -> int | None:
+        months = {
+            "jan": 1, "january": 1,
+            "feb": 2, "february": 2,
+            "mar": 3, "march": 3,
+            "apr": 4, "april": 4,
+            "may": 5,
+            "jun": 6, "june": 6,
+            "jul": 7, "july": 7,
+            "aug": 8, "august": 8,
+            "sep": 9, "sept": 9, "september": 9,
+            "oct": 10, "october": 10,
+            "nov": 11, "november": 11,
+            "dec": 12, "december": 12,
+        }
+        key = value.strip().lower()
+        return months.get(key) or months.get(key[:3])
+
+    def parse_time_part(self, raw: str) -> tuple[int, int] | None:
+        token = raw.strip().lower().replace(" ", "")
+        token = token.replace("a.m.", "am").replace("p.m.", "pm")
+        match = re.fullmatch(r"(\d{1,2})(?::?(\d{2}))?([ap](?:m)?)?", token)
+        if not match:
+            return None
+        hour = int(match.group(1))
+        minute = int(match.group(2) or 0)
+        suffix = match.group(3)
+        if minute > 59:
+            return None
+        if suffix:
+            if hour < 1 or hour > 12:
+                return None
+            if suffix.startswith("p") and hour != 12:
+                hour += 12
+            if suffix.startswith("a") and hour == 12:
+                hour = 0
+        elif hour > 23:
+            return None
+        return hour, minute
+
+    def extract_time_from_text(self, text: str) -> tuple[str, int, int, bool]:
+        patterns = [
+            r"\b\d{1,2}:\d{2}\s*(?:am|pm|a|p)?\b",
+            r"\b\d{1,2}\s*(?:am|pm|a|p)\b",
+            r"\b\d{3,4}\b",
+        ]
+        for pattern in patterns:
+            matches = list(re.finditer(pattern, text, flags=re.I))
+            if not matches:
+                continue
+            match = matches[-1]
+            parsed = self.parse_time_part(match.group(0))
+            if not parsed:
+                continue
+            hour, minute = parsed
+            new_text = (text[:match.start()] + " " + text[match.end():]).strip()
+            new_text = re.sub(r"\b(at|by)\b", " ", new_text)
+            new_text = re.sub(r"\s+", " ", new_text).strip()
+            return new_text, hour, minute, True
+        return text, 0, 0, False
+
+    def parse_task_datetime(self, value: str) -> tuple[str, str]:
+        text = self.clean_datetime_text(value)
+        if not text:
+            return "", ""
+
+        now = datetime.now()
+        explicit_relative = False
+        date_text, hour, minute, has_time = self.extract_time_from_text(text)
+        date_text = re.sub(r"\b(on|at|by|due)\b", " ", date_text)
+        date_text = re.sub(r"\s+", " ", date_text).strip()
+
+        if not date_text and has_time:
+            candidate = datetime(now.year, now.month, now.day, int(hour), int(minute))
+            if candidate < now:
+                candidate = candidate + timedelta(days=1)
+            iso = candidate.strftime("%Y-%m-%dT%H:%M")
+            display = self.format_task_datetime(iso, include_time=True)
+            return iso, display
+
+        if re.search(r"\btoday\b", date_text):
+            day = now.day
+            month = now.month
+            year = now.year
+            explicit_relative = True
+        elif re.search(r"\btomorrow\b", date_text):
+            tomorrow = now + timedelta(days=1)
+            day = tomorrow.day
+            month = tomorrow.month
+            year = tomorrow.year
+            explicit_relative = True
+        else:
+            date_text = re.sub(r"\b(today|tomorrow)\b", " ", date_text).strip()
+            day = month = year = None
+
+            compact_month_first = re.fullmatch(r"([a-z]{3,9})(\d{1,2})(?:\s*(\d{4}))?", date_text)
+            compact_day_first = re.fullmatch(r"(\d{1,2})([a-z]{3,9})(?:\s*(\d{4}))?", date_text)
+
+            if compact_month_first:
+                month = self.month_from_text(compact_month_first.group(1))
+                day = int(compact_month_first.group(2))
+                year = int(compact_month_first.group(3)) if compact_month_first.group(3) else None
+            elif compact_day_first:
+                day = int(compact_day_first.group(1))
+                month = self.month_from_text(compact_day_first.group(2))
+                year = int(compact_day_first.group(3)) if compact_day_first.group(3) else None
+            else:
+                parts = [p for p in re.split(r"[\s/\-]+", date_text) if p]
+                if not parts:
+                    raise ValueError("Enter a date")
+                month_index = next((i for i, p in enumerate(parts) if self.month_from_text(p)), None)
+                if month_index is not None:
+                    month = self.month_from_text(parts[month_index])
+                    numeric_parts = [p for i, p in enumerate(parts) if i != month_index]
+                    if not numeric_parts:
+                        raise ValueError("Enter a day")
+                    day = int(numeric_parts[0])
+                    if len(numeric_parts) > 1:
+                        year = int(numeric_parts[1])
+                else:
+                    if len(parts) < 2:
+                        raise ValueError("Enter date as DD-MM, DD-MMM, or with your chosen date order")
+                    first = int(parts[0])
+                    second = int(parts[1])
+                    if len(parts) > 2:
+                        year = int(parts[2])
+                    if self.date_display_order() == "month_date":
+                        month, day = first, second
+                    else:
+                        day, month = first, second
+
+            if not day or not month:
+                raise ValueError("Could not understand date")
+            if year is not None and year < 100:
+                year += 2000
+            if year is None:
+                year = now.year
+
+        try:
+            candidate = datetime(int(year), int(month), int(day), int(hour), int(minute))
+        except Exception as exc:
+            raise ValueError("Date/time is not valid") from exc
+
+        if not explicit_relative and year == now.year:
+            if has_time:
+                if candidate < now:
+                    candidate = candidate.replace(year=now.year + 1)
+            elif candidate.date() < now.date():
+                candidate = candidate.replace(year=now.year + 1)
+
+        iso = candidate.strftime("%Y-%m-%dT%H:%M")
+        display = self.format_task_datetime(iso, include_time=has_time)
+        return iso, display
+
+    def format_task_datetime(self, iso_value: str | None, include_time: bool = True) -> str:
+        if not iso_value:
+            return ""
+        try:
+            value = datetime.fromisoformat(iso_value.replace("Z", "+00:00"))
+        except Exception:
+            return iso_value
+
+        if self.date_display_order() == "month_date":
+            date_part = value.strftime("%b %d, %Y")
+        else:
+            date_part = value.strftime("%d %b %Y")
+
+        if not include_time:
+            return date_part
+
+        if self.time_display_format() == "ampm":
+            time_part = value.strftime("%I:%M %p")
+        else:
+            time_part = value.strftime("%H:%M hrs")
+        return f"{date_part}, {time_part}"
+
+    def update_detail_due_preview(self) -> None:
+        text = self.detail_due_entry.get_text().strip()
+        if not text:
+            self.detail_due_preview.set_text("")
+            return
+        try:
+            _iso, display = self.parse_task_datetime(text)
+            self.detail_due_preview.set_text(display)
+        except Exception as exc:
+            self.detail_due_preview.set_text(f"Could not understand date/time: {exc}")
+
+    def update_detail_reminder_preview(self) -> None:
+        text = self.detail_reminder_entry.get_text().strip()
+        if not text:
+            self.detail_reminder_preview.set_text("")
+            return
+        try:
+            _iso, display = self.parse_task_datetime(text)
+            self.detail_reminder_preview.set_text(display)
+        except Exception as exc:
+            self.detail_reminder_preview.set_text(f"Could not understand reminder time: {exc}")
+
+    def is_task_details_open(self) -> bool:
+        return hasattr(self, "content_stack") and self.content_stack.get_visible_child_name() == "detail"
+
+    def open_task_details_editor(self) -> None:
+        task = self.get_selected_task()
+        if not task:
+            self.set_status("No task selected")
+            return
+        task = self.db.get_task(task.id) or task
+        self.detail_task_id = task.id
+        self.detail_name_entry.set_text(task.title)
+
+        buffer = self.detail_notes_view.get_buffer()
+        buffer.set_text(task.notes or "")
+
+        self.detail_due_entry.set_text(self.format_task_datetime(task.due_date) if getattr(task, "due_date", None) else "")
+        self.detail_remind_due_check.set_active(bool(getattr(task, "remind_at_task", 0)))
+        self.detail_remind_custom_check.set_active(bool(getattr(task, "reminder_at", None)))
+        self.detail_reminder_entry.set_text(self.format_task_datetime(task.reminder_at) if getattr(task, "reminder_at", None) else "")
+        self.update_detail_due_preview()
+        self.update_detail_reminder_preview()
+        self.content_stack.set_visible_child_name("detail")
+        self.set_status("Task details · Ctrl+Enter save · Esc cancel")
+        GLib.idle_add(lambda: (self.detail_name_entry.grab_focus(), False)[1])
+
+    def cancel_task_details_editor(self) -> None:
+        self.detail_task_id = None
+        self.content_stack.set_visible_child_name("list")
+        self.set_status("Task details cancelled")
+        self.focus_entry()
+
+    def save_task_details_editor(self, sync_after: bool = False) -> None:
+        if not self.detail_task_id:
+            return
+        task = self.db.get_task(self.detail_task_id)
+        if not task:
+            self.cancel_task_details_editor()
+            self.set_status("Selected task no longer exists")
+            return
+
+        title = self.detail_name_entry.get_text().strip()
+        if not title:
+            self.set_status("Task name cannot be empty")
+            return
+
+        notes_buffer = self.detail_notes_view.get_buffer()
+        start_iter = notes_buffer.get_start_iter()
+        end_iter = notes_buffer.get_end_iter()
+        notes = notes_buffer.get_text(start_iter, end_iter, True)
+
+        due_text = self.detail_due_entry.get_text().strip()
+        due_iso = None
+        if due_text:
+            try:
+                due_iso, _display = self.parse_task_datetime(due_text)
+            except Exception as exc:
+                self.set_status(f"Date/time not understood: {exc}")
+                return
+
+        reminder_text = self.detail_reminder_entry.get_text().strip()
+        reminder_iso = None
+        if self.detail_remind_custom_check.get_active() and reminder_text:
+            try:
+                reminder_iso, _display = self.parse_task_datetime(reminder_text)
+            except Exception as exc:
+                self.set_status(f"Reminder time not understood: {exc}")
+                return
+
+        task_list = self.db.get_list(task.list_id)
+        dirty = self.is_google_list(task_list)
+        self.db.update_task_details(
+            task.id,
+            title=title,
+            notes=notes,
+            due_date=due_iso,
+            remind_at_task=self.detail_remind_due_check.get_active(),
+            reminder_at=reminder_iso,
+            dirty=dirty,
+        )
+        self.detail_task_id = None
+        self.content_stack.set_visible_child_name("list")
+        self.refresh_tasks(keep_selection=True)
+        self.set_status("Task details saved")
+        self.focus_entry()
+        if self.google_ready() and (dirty or sync_after):
+            self.connect_google_in_background(interactive=False)
 
     def get_selected_task(self) -> Task | None:
         if not self.task_rows or self.selected_index >= len(self.task_rows):
@@ -1531,6 +2020,9 @@ class TaskPopWindow(Gtk.ApplicationWindow):
         check = Gtk.Label(label=mark)
         check.set_width_chars(2)
         box.append(check)
+
+        title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        title_box.set_hexpand(True)
         title = Gtk.Label(label=task.title)
         title.set_xalign(0)
         title.set_wrap(True)
@@ -1538,7 +2030,23 @@ class TaskPopWindow(Gtk.ApplicationWindow):
         title.add_css_class("task-title")
         if task.status == "completed":
             title.add_css_class("task-title-completed")
-        box.append(title)
+        title_box.append(title)
+
+        meta_parts = []
+        if task.due_date:
+            meta_parts.append(self.format_task_datetime(task.due_date))
+        if task.notes:
+            meta_parts.append("📝")
+        if task.remind_at_task or task.reminder_at:
+            meta_parts.append("🔔")
+        if meta_parts:
+            meta = Gtk.Label(label="  ·  ".join(meta_parts))
+            meta.set_xalign(0)
+            meta.add_css_class("status")
+            meta.set_wrap(True)
+            title_box.append(meta)
+        box.append(title_box)
+
         if task.is_dirty:
             dirty = Gtk.Label(label="•")
             dirty.set_tooltip_text("Pending sync")
@@ -1553,6 +2061,9 @@ class TaskPopWindow(Gtk.ApplicationWindow):
         shift = bool(state & Gdk.ModifierType.SHIFT_MASK)
 
         if keyval == Gdk.KEY_Escape:
+            if self.is_task_details_open():
+                self.cancel_task_details_editor()
+                return True
             if self.pending_action:
                 self.clear_pending_action()
                 self.set_status("Cancelled")
@@ -1563,8 +2074,21 @@ class TaskPopWindow(Gtk.ApplicationWindow):
         if self.stack.get_visible_child_name() != "tasks":
             return False
 
+        if self.is_task_details_open():
+            if ctrl and keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+                self.save_task_details_editor(sync_after=False)
+                return True
+            if ctrl and keyval in (Gdk.KEY_s, Gdk.KEY_S):
+                self.save_task_details_editor(sync_after=True)
+                return True
+            return False
+
+        if ctrl and keyval in (Gdk.KEY_d, Gdk.KEY_D):
+            self.open_task_details_editor()
+            return True
+
         if shift and keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
-            self.start_edit_selected_task()
+            self.open_task_details_editor()
             return True
 
         if ctrl and keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
@@ -1583,8 +2107,12 @@ class TaskPopWindow(Gtk.ApplicationWindow):
             self.copy_selected_task_to_clipboard()
             return True
 
-        if ctrl and keyval in (Gdk.KEY_s, Gdk.KEY_S):
+        if ctrl and keyval in (Gdk.KEY_o, Gdk.KEY_O):
             self.show_settings_dialog()
+            return True
+
+        if ctrl and keyval in (Gdk.KEY_s, Gdk.KEY_S):
+            self.start_sync_now_flow()
             return True
 
         if ctrl and keyval in (Gdk.KEY_k, Gdk.KEY_K):

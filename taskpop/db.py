@@ -5,7 +5,7 @@ import os
 import sqlite3
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -14,6 +14,47 @@ APP_NAME = "taskpop"
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def is_midnight(dt: datetime | None) -> bool:
+    if not dt:
+        return False
+    return dt.hour == 0 and dt.minute == 0 and dt.second == 0 and dt.microsecond == 0
+
+
+def merge_google_due_date(existing_due: str | None, google_due: str | None) -> str | None:
+    """Merge Google due date with TaskPop's local time.
+
+    Google Tasks API stores only due dates. It discards due time and returns
+    midnight. If TaskPop already has a time for the task, keep that time while
+    accepting Google's date.
+    """
+    if not google_due:
+        # Keep local due date/time if Google sends no due value.
+        return existing_due
+
+    google_dt = parse_iso_datetime(google_due)
+    if not google_dt:
+        return existing_due or google_due
+
+    existing_dt = parse_iso_datetime(existing_due)
+
+    if existing_dt and not is_midnight(existing_dt) and is_midnight(google_dt):
+        merged = datetime.combine(google_dt.date(), existing_dt.time())
+        if existing_dt.tzinfo:
+            merged = merged.replace(tzinfo=existing_dt.tzinfo)
+        return merged.isoformat(timespec="minutes")
+
+    return google_due
 
 
 def xdg_config_dir() -> Path:
@@ -44,6 +85,9 @@ class Task:
     sort_order: int
     updated_at: str
     completed_at: str | None = None
+    due_date: str | None = None
+    reminder_at: str | None = None
+    remind_at_task: int = 0
 
 
 class Config:
@@ -121,7 +165,17 @@ class TaskDB:
             """
         )
         self.ensure_list_position_column()
+        self.ensure_task_detail_columns()
         self.conn.commit()
+
+    def ensure_task_detail_columns(self) -> None:
+        columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(tasks)").fetchall()}
+        if "due_date" not in columns:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN due_date TEXT")
+        if "reminder_at" not in columns:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN reminder_at TEXT")
+        if "remind_at_task" not in columns:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN remind_at_task INTEGER NOT NULL DEFAULT 0")
 
     def ensure_list_position_column(self) -> None:
         columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(lists)").fetchall()}
@@ -237,24 +291,36 @@ class TaskDB:
         status: str = "needsAction",
         notes: str | None = None,
         completed_at: str | None = None,
+        due_date: str | None = None,
     ) -> str:
         ts = now_iso()
         row = self.conn.execute(
             "SELECT id FROM tasks WHERE google_task_id = ?", (google_task_id,)
         ).fetchone()
         if row:
+            existing = self.conn.execute(
+                "SELECT due_date FROM tasks WHERE id = ?", (row["id"],)
+            ).fetchone()
+            merged_due_date = merge_google_due_date(
+                existing["due_date"] if existing else None,
+                due_date,
+            )
             self.conn.execute(
                 """
                 UPDATE tasks
-                SET title = ?, notes = ?, status = ?, completed_at = ?, is_deleted = 0,
+                SET title = ?, notes = ?, status = ?, completed_at = ?, due_date = ?, is_deleted = 0,
                     is_dirty = 0, updated_at = ?
                 WHERE id = ? AND is_dirty = 0
                 """,
-                (title, notes, status, completed_at, ts, row["id"]),
+                (title, notes, status, completed_at, merged_due_date, ts, row["id"]),
             )
             self.conn.commit()
             return row["id"]
-        return self.add_task(list_id, title, notes=notes, google_task_id=google_task_id, dirty=False)
+        task_id = self.add_task(list_id, title, notes=notes, google_task_id=google_task_id, dirty=False)
+        if due_date:
+            self.conn.execute("UPDATE tasks SET due_date = ? WHERE id = ?", (due_date, task_id))
+            self.conn.commit()
+        return task_id
 
     def list_tasks(self, list_id: str, include_completed_ids: set[str] | None = None, filter_text: str = "") -> list[Task]:
         # Completed tasks stay visible until explicitly cleared.
@@ -267,7 +333,7 @@ class TaskDB:
             params.append(f"%{filter_text.strip().lower()}%")
 
         query = f"""
-            SELECT id, list_id, title, notes, status, google_task_id, is_dirty, sort_order, updated_at, completed_at
+            SELECT id, list_id, title, notes, status, google_task_id, is_dirty, sort_order, updated_at, completed_at, due_date, reminder_at, remind_at_task
             FROM tasks
             WHERE {' AND '.join(clauses)}
             ORDER BY
@@ -281,7 +347,7 @@ class TaskDB:
     def get_task(self, task_id: str) -> Task | None:
         row = self.conn.execute(
             """
-            SELECT id, list_id, title, notes, status, google_task_id, is_dirty, sort_order, updated_at, completed_at
+            SELECT id, list_id, title, notes, status, google_task_id, is_dirty, sort_order, updated_at, completed_at, due_date, reminder_at, remind_at_task
             FROM tasks
             WHERE id = ? AND is_deleted = 0
             """,
@@ -297,6 +363,36 @@ class TaskDB:
             WHERE id = ?
             """,
             (title.strip(), 1 if dirty else 0, now_iso(), task_id),
+        )
+        self.conn.commit()
+
+    def update_task_details(
+        self,
+        task_id: str,
+        title: str,
+        notes: str | None,
+        due_date: str | None,
+        remind_at_task: bool = False,
+        reminder_at: str | None = None,
+        dirty: bool = True,
+    ) -> None:
+        self.conn.execute(
+            """
+            UPDATE tasks
+            SET title = ?, notes = ?, due_date = ?, remind_at_task = ?, reminder_at = ?,
+                is_dirty = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                title.strip(),
+                notes,
+                due_date,
+                1 if remind_at_task else 0,
+                reminder_at,
+                1 if dirty else 0,
+                now_iso(),
+                task_id,
+            ),
         )
         self.conn.commit()
 
@@ -333,7 +429,8 @@ class TaskDB:
             rows = self.conn.execute(
                 """
                 SELECT t.id, t.list_id, t.title, t.notes, t.status, t.google_task_id,
-                       t.is_dirty, t.sort_order, t.updated_at, t.completed_at
+                       t.is_dirty, t.sort_order, t.updated_at, t.completed_at,
+                       t.due_date, t.reminder_at, t.remind_at_task
                 FROM tasks t
                 JOIN lists l ON l.id = t.list_id
                 WHERE t.is_dirty = 1
@@ -345,7 +442,7 @@ class TaskDB:
         else:
             rows = self.conn.execute(
                 """
-                SELECT id, list_id, title, notes, status, google_task_id, is_dirty, sort_order, updated_at, completed_at
+                SELECT id, list_id, title, notes, status, google_task_id, is_dirty, sort_order, updated_at, completed_at, due_date, reminder_at, remind_at_task
                 FROM tasks
                 WHERE is_dirty = 1 AND is_deleted = 0
                 ORDER BY updated_at ASC
@@ -394,7 +491,7 @@ class TaskDB:
     def completed_tasks(self, list_id: str) -> list[Task]:
         rows = self.conn.execute(
             """
-            SELECT id, list_id, title, notes, status, google_task_id, is_dirty, sort_order, updated_at, completed_at
+            SELECT id, list_id, title, notes, status, google_task_id, is_dirty, sort_order, updated_at, completed_at, due_date, reminder_at, remind_at_task
             FROM tasks
             WHERE list_id = ?
               AND is_deleted = 0

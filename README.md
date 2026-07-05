@@ -8,12 +8,15 @@ See [Changelog.md](Changelog.md) for release history.
 
 ## Features
 
-- Fast popup task list for Ubuntu/GNOME.
+- Fast popup task manager for Ubuntu/GNOME.
 - Local-first task storage using SQLite.
-- Optional Google Tasks integration through browser OAuth.
+- Optional Google Tasks sync.
 - Separate local lists and Google Tasks lists.
+- In-place task details panel.
+- Task notes/details.
+- Smart date and time entry.
+- TaskPop-local due time and reminder fields.
 - Keyboard navigation for tasks, lists, and commands.
-- In-place task details panel with notes, smart date/time input, and reminder fields.
 - Command mode by typing `:`.
 - Custom app icon and GNOME shortcut support.
 
@@ -21,6 +24,7 @@ See [Changelog.md](Changelog.md) for release history.
 
 ```bash
 cd taskpop_mvp
+chmod +x install_ubuntu.sh install_shortcut_gnome.sh kill_taskpop_instances.sh debug_taskpop.sh
 ./install_ubuntu.sh
 ./install_shortcut_gnome.sh
 taskpop
@@ -34,7 +38,7 @@ Super + T → TaskPop
 
 ## Google Tasks setup
 
-1. Create/select a project in Google Cloud Console.
+1. Create or select a project in Google Cloud Console.
 2. Enable Google Tasks API.
 3. Configure OAuth consent.
 4. Add your Google account as a test user.
@@ -52,10 +56,89 @@ Then open TaskPop → Settings → enable Google Tasks → Sync Now.
 
 TaskPop keeps local lists and Google Tasks lists separate.
 
-- 💻 Local lists stay local.
-- 🌐 Google Tasks lists sync with Google Tasks.
-- Both can be enabled at the same time.
-- You cannot disable both Local Lists and Google Tasks at the same time.
+```text
+💻 Local lists stay local.
+🌐 Google Tasks lists sync with Google Tasks.
+```
+
+Both can be enabled at the same time. TaskPop does not allow both Local Lists and Google Tasks to be disabled at the same time.
+
+## Task details
+
+Select a task and press:
+
+```text
+Ctrl + D
+```
+
+This opens the task details panel with:
+
+- Task name
+- Task details / notes
+- Date & time
+- Reminder options
+
+Save with:
+
+```text
+Ctrl + S
+```
+
+Cancel with:
+
+```text
+Esc
+```
+
+## Smart date and time input
+
+TaskPop accepts flexible date/time formats.
+
+Examples:
+
+```text
+23/08 6am
+13jan 1600
+tomorrw at 6pm
+jan11 4pm
+18:30
+0830
+6pm
+```
+
+Supported date styles include:
+
+```text
+DD-MM-YYYY
+DD/MM/YYYY
+DD MM YYYY
+DD-MM
+DD/MM
+DD MM
+DD-MMM
+DD MMM
+13jan
+jan13
+```
+
+Separator can be `/`, `-`, or a space.
+
+If year is not entered, TaskPop uses the current year if the date is upcoming, otherwise next year.
+
+If only time is entered, TaskPop uses today if the time is still upcoming, otherwise tomorrow.
+
+Settings allow:
+
+```text
+Date-Month or Month-Date
+24 hrs or AM/PM
+```
+
+## Google Tasks date/time note
+
+Google Tasks sync supports task title, notes, completion status, and due date.
+
+Google Tasks API stores only the due date and discards due time. TaskPop therefore keeps due time and reminder timing locally.
 
 ## Keyboard shortcuts
 
@@ -113,15 +196,11 @@ The primary Google Tasks list cannot be deleted by Google. If you try to delete 
 
 ## Planned for future
 
-- Desktop reminder notifications.
-- Recurring tasks.
-- More shortcut keys.
-- Better recurring task support.
+- Desktop reminders and notifications.
+- Reminder background checker using systemd user timer.
+- Due today / upcoming / overdue task views.
 - Search across all lists.
+- Task descriptions formatting.
+- Better recurring task support.
 - Import/export.
 - Packaging as a `.deb`.
-
-
-## Google Tasks date/time note
-
-Google Tasks sync supports task title, notes, completion status, and due date. Google Tasks API stores only the due date and discards due time, so TaskPop keeps due time and reminder timing locally.

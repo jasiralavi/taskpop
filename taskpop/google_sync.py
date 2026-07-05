@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -132,6 +133,7 @@ class GoogleSync:
                     status=item.get("status", "needsAction"),
                     notes=item.get("notes"),
                     completed_at=item.get("completed"),
+                    due_date=item.get("due"),
                 )
             token = result.get("nextPageToken")
             if not token:
@@ -152,6 +154,14 @@ class GoogleSync:
             }
             if task.status == "completed" and task.completed_at:
                 body["completed"] = task.completed_at
+            if task.due_date:
+                # Google Tasks API stores only the due date; it discards due time.
+                # Keep TaskPop's local time in SQLite and send date-only to Google.
+                try:
+                    due_value = datetime.fromisoformat(str(task.due_date).replace("Z", "+00:00"))
+                    body["due"] = due_value.date().isoformat() + "T00:00:00.000Z"
+                except Exception:
+                    body["due"] = str(task.due_date)[:10] + "T00:00:00.000Z"
 
             if task.google_task_id:
                 service.tasks().patch(

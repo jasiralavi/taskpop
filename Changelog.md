@@ -1,16 +1,46 @@
 # Changelog
 
-## v29-test
+## v33-test
 
-Test build. Do not push until verified.
+Test build. Do not push as final until verified.
+
+- Cleaned up README for v0.3.0 release.
+- Updated keyboard shortcut documentation.
+- Updated command documentation.
+- Confirmed Google Tasks date/time limitation note.
+- Prepared source package for clean install and release push.
+
+## v32-test
+
+- Fixed Google sync overwriting TaskPop due time with midnight.
+- Google sync now sends due date only, while TaskPop preserves local due time and reminders.
+
+## v31-test
+
+- Changed `Shift+Enter` to open the full task details panel.
+- Changed Settings shortcut to `Ctrl+O`.
+- Changed `Ctrl+S` to save/sync depending on context.
+- Fixed notes field Tab behavior.
+- Improved time-only parsing.
+- Clarified Google Tasks due date/time behavior.
+
+## v30-test
+
+- Added task details panel with `Ctrl+D`.
+- Added task details / notes.
+- Added smart date and time parsing.
+- Added date/time display settings.
+- Added reminder fields in task details panel.
+
+## v29-test
 
 - Added task editing with `Shift+Enter` and `Ctrl+E`.
 - Added `Ctrl+L` to rename current list.
 - Added `Ctrl+C` to copy selected task text.
-- Added `Ctrl+S` to open Settings.
+- Added `Ctrl+S` to open Settings at the time.
 - Added `Ctrl+K` to clear completed tasks.
 - Added `Ctrl+1` … `Ctrl+9` to jump to visible list numbers.
-- Added `Ctrl+0` to jump to the last visible list.
+- Added `Ctrl+0` to the last visible list.
 - Made Clear and Settings buttons smaller and square.
 - Split README and changelog.
 
@@ -18,7 +48,7 @@ Test build. Do not push until verified.
 
 - Primary Google Tasks list delete/convert now shows a warning instead of hiding it.
 - Added `:convert-to-local` and `:convert-to-google-task` aliases.
-- Added list ordering commands: `:reorder`, `:order-az`, `:order-za`, `:order-lg`, `:order-gl`.
+- Added list ordering commands.
 - Improved command filtering.
 - Prevented disabling both Local Lists and Google Tasks.
 
