@@ -13,6 +13,7 @@ See [Changelog.md](Changelog.md) for release history.
 - Optional Google Tasks integration through browser OAuth.
 - Separate local lists and Google Tasks lists.
 - Keyboard navigation for tasks, lists, and commands.
+- In-place task details panel with notes, smart date/time input, and reminder fields.
 - Command mode by typing `:`.
 - Custom app icon and GNOME shortcut support.
 
@@ -61,13 +62,15 @@ TaskPop keeps local lists and Google Tasks lists separate.
 | Shortcut | Action |
 |---|---|
 | `Super + T` | Open/close TaskPop |
-| `Ctrl + Enter` | Add task / run selected command / save edit |
-| `Shift + Enter` | Edit selected task |
-| `Ctrl + E` | Edit selected task |
+| `Ctrl + Enter` | Add task / run selected command |
+| `Ctrl + D` | Open task details panel |
+| `Shift + Enter` | Open task details panel |
+| `Ctrl + E` | Quick edit selected task name |
 | `Ctrl + L` | Rename current list |
 | `Ctrl + C` | Copy selected task text |
-| `Ctrl + S` | Open Settings |
-| `Ctrl + K` | Clear completed tasks in current list |
+| `Ctrl + O` | Open Settings |
+| `Ctrl + S` | Save in details/settings; sync in list view |
+| `Ctrl + K` | Clear completed tasks |
 | `Ctrl + Tab` | Next list |
 | `Ctrl + Shift + Tab` | Previous list |
 | `Ctrl + 1` … `Ctrl + 9` | Jump to visible list number |
@@ -110,11 +113,15 @@ The primary Google Tasks list cannot be deleted by Google. If you try to delete 
 
 ## Planned for future
 
-- Task descriptions/notes.
-- Due dates and times.
-- System reminders and desktop notifications.
+- Desktop reminder notifications.
+- Recurring tasks.
 - More shortcut keys.
 - Better recurring task support.
 - Search across all lists.
 - Import/export.
 - Packaging as a `.deb`.
+
+
+## Google Tasks date/time note
+
+Google Tasks sync supports task title, notes, completion status, and due date. Google Tasks API stores only the due date and discards due time, so TaskPop keeps due time and reminder timing locally.
