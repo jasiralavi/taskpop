@@ -65,7 +65,7 @@ Both can be enabled at the same time. Bbut ofcourse, we can't disable both at th
 New lists can be created from the Settings window. You can create Local Lists or Google Task Lists that sync.
 Commands:
 - Type `:list-l` followed by the list name to create a local list.
-- Type `:list-l` followed by the list name to create a Google Task list. 
+- Type `:list-gt` followed by the list name to create a Google Task list. 
 - Type `:unlist` to delete the current list you are on.
 
 Notes: 
@@ -99,25 +99,32 @@ Cancel anytime with `Esc`.
 
 ## Keyboard shortcuts
 
-| Shortcut | Action |
+| App Shortcuts | Action |
 |---|---|
-| `Super + T` | Open/close TaskPop |
-| `Ctrl + Enter` | Add task / run selected command |
-| `Ctrl + D` | Open task details panel |
-| `Shift + Enter` | Open task details panel |
-| `Ctrl + E` | Quick edit selected task name |
-| `Ctrl + L` | Rename current list |
-| `Ctrl + C` | Copy selected task text |
 | `Ctrl + O` | Open Settings |
 | `Ctrl + S` | Save in details/settings; sync in list view |
+| `Ctrl + Enter` | Add task / run selected command |
+| `Esc` | Close popup or cancel current action |
+
+| Tasks Shortcuts | Action |
+|---|---|
+| `Super + T` | Open/close TaskPop |
+| `↑` / `↓` | Navigate tasks or commands |
+| `Space` | Tick/untick selected task when input is empty |
+| `Ctrl + Enter` | Add task / run selected command |
 | `Ctrl + K` | Clear completed tasks |
+| `Ctrl + D` / `Shift + Enter` | Open task details panel |
+| `Ctrl + E` | Quick edit selected task name |
+| `Ctrl + C` | Copy selected task text |
+
+| Lists Shortcuts | Action |
+|---|---|
 | `Ctrl + Tab` | Next list |
 | `Ctrl + Shift + Tab` | Previous list |
 | `Ctrl + 1` … `Ctrl + 9` | Jump to visible list number |
 | `Ctrl + 0` | Jump to last visible list |
-| `↑` / `↓` | Navigate tasks or commands |
-| `Space` | Tick/untick selected task when input is empty |
-| `Esc` | Close popup or cancel current action |
+| `Ctrl + L` | Rename current list |
+
 
 ## Commands
 
